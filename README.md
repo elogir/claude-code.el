@@ -188,6 +188,33 @@ Sometimes you want to send a quick response to Claude without switching to the C
 - `claude-code-send-2` (`C-c c 2`) - send "2" to Claude
 - `claude-code-send-3` (`C-c c 3`) - send "3" to Claude
 
+### Hold-to-Talk Voice Mode
+
+Claude Code's voice mode activates when you hold the spacebar — under the hood it just watches for a stream of repeated space characters from the terminal (the way a held spacebar looks under OS keyboard auto-repeat) and silently swallows them once recording starts. `claude-code-voice-hold` mimics that from any buffer: bind it to a key, and the package sends a space on press and another space for every auto-repeat tick while you hold the key. Claude Code stops recording on its own when the spaces stop, so nothing is sent on release.
+
+**Enable voice mode in Claude Code first.** Run `/voice` inside the Claude buffer until it prints `Voice mode enabled (hold)`. Until that is done, holding the bound key will just type literal spaces.
+
+```elisp
+;; Hold F12 to dictate.
+(global-set-key (kbd "<f12>") 'claude-code-voice-hold)
+
+;; Optional: auto-submit the transcription on release.
+;;   'delay   — send after a short delay; ESC or C-g during the
+;;              window cancels (also via M-x claude-code-voice-cancel-auto-send).
+;;   'confirm — wait the same delay, then prompt y-or-n-p before sending.
+(setq claude-code-voice-auto-send 'delay)
+```
+
+`claude-code-voice-auto-send` controls what happens after release:
+
+- `nil` (default) — leave the transcription in Claude Code's input box.
+- `'delay` — send Return automatically after `claude-code-voice-auto-send-delay` seconds (default `2.0`s). The package installs a transient keymap during that window so `ESC` or `C-g` aborts the send. The command `claude-code-voice-cancel-auto-send` does the same and can be called from anywhere.
+- `'confirm` — after the same delay, ask `Send transcription to Claude? (y or n)` and only send Return on `y`.
+
+When the user cancels (`'delay`) or answers `n` (`'confirm`), `claude-code-voice-clear-on-cancel` (default `t`) controls whether a single `C-c` is sent to the Claude Code buffer to clear the dictated text from its input box. Set it to `nil` to keep the transcription around for editing.
+
+`claude-code-voice-hold-timeout` controls how quickly the key is treated as released after auto-repeat stops. If you ever need to send something other than a literal space, customize `claude-code-voice-key-press-string`, `claude-code-voice-key-repeat-string`, and `claude-code-voice-key-release-string`.
+
 ## IDE Integration with [Monet](https://github.com/stevemolitor/monet)
 You can optionally use [Monet](https://github.com/stevemolitor/monet) for IDE integration. To integrate Monet with Claude do this (or the equivalent `use-package` declaration shown above):
 

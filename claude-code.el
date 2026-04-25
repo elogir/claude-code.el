@@ -201,6 +201,88 @@ current buffer."
   :type 'boolean
   :group 'claude-code-window)
 
+(defcustom claude-code-voice-key-press-string " "
+  "String sent at the start of `claude-code-voice-hold'.
+
+The default sends a single space character.  Claude Code's voice mode
+detects a stream of repeated spaces (the way an auto-repeating
+terminal sends a held spacebar) and begins recording once enough have
+arrived."
+  :type 'string
+  :group 'claude-code)
+
+(defcustom claude-code-voice-key-repeat-string " "
+  "String sent for each auto-repeat tick during `claude-code-voice-hold'.
+
+The default sends another space character so that Claude Code keeps
+seeing the spacebar as held."
+  :type 'string
+  :group 'claude-code)
+
+(defcustom claude-code-voice-key-release-string ""
+  "String sent at the end of `claude-code-voice-hold'.
+
+Empty by default: Claude Code's voice mode stops recording on its own
+once spaces stop arriving, and it cleans up the spaces it briefly
+echoed.  Set to a non-empty string only if your setup needs an
+explicit release signal."
+  :type 'string
+  :group 'claude-code)
+
+(defcustom claude-code-voice-hold-timeout 0.2
+  "Seconds of input idleness after which the voice key is treated as released.
+
+Operating-system keyboard auto-repeat fires events well below this
+interval, so a small value reliably distinguishes a held key from a
+released one inside `claude-code-voice-hold'."
+  :type 'number
+  :group 'claude-code)
+
+(defcustom claude-code-voice-auto-send nil
+  "How to auto-submit dictated text after `claude-code-voice-hold'.
+
+Possible values:
+  nil       Do nothing on release (the default).
+  \\='delay    Send Return after `claude-code-voice-auto-send-delay'
+            seconds.  Pressing escape or quit during the delay
+            window cancels the pending send (also via
+            `claude-code-voice-cancel-auto-send').
+  \\='confirm  Wait `claude-code-voice-auto-send-delay' seconds, then
+            ask for confirmation before sending Return.
+
+Any other non-nil value is treated as \\='delay for backward
+compatibility."
+  :type '(choice (const :tag "Disabled" nil)
+                 (const :tag "Auto-send after delay (ESC/C-g cancels)" delay)
+                 (const :tag "Confirm before sending" confirm))
+  :group 'claude-code)
+
+(defcustom claude-code-voice-auto-send-delay 2.0
+  "Seconds to wait before auto-sending Return after `claude-code-voice-hold'.
+
+Only used when `claude-code-voice-auto-send' is non-nil.  Gives Claude
+Code's voice mode time to finish writing the transcribed text into
+its input box before the Return is sent, and gives the user a window
+in which to cancel."
+  :type 'number
+  :group 'claude-code)
+
+(defcustom claude-code-voice-clear-on-cancel t
+  "Whether to clear Claude Code's input box when an auto-send is cancelled.
+
+When non-nil (the default), cancelling a pending \\='delay auto-send
+or answering no to a \\='confirm prompt sends a Ctrl-C to the Claude
+Code buffer, which discards the dictated text.  When nil, the
+transcription is left in the input box for the user to edit."
+  :type 'boolean
+  :group 'claude-code)
+
+(defvar claude-code--voice-pending-send-timer nil
+  "Active timer scheduled by `claude-code-voice-hold' for auto-send, or nil.")
+
+(defvar claude-code--voice-pending-send-buffer nil
+  "Claude Code buffer associated with the pending auto-send, or nil.")
+
 ;;;;; Eat terminal customizations
 ;; Eat-specific terminal faces
 (defface claude-code-eat-prompt-annotation-running-face
@@ -2016,6 +2098,120 @@ having to switch to the REPL buffer."
   (interactive)
   (claude-code--with-buffer
    (claude-code--term-send-string claude-code-terminal-backend (kbd "ESC"))))
+
+;;;###autoload
+(defun claude-code-voice-hold ()
+  "Mimic holding the spacebar in Claude Code, e.g. for hold-to-talk voice mode.
+
+Bind this command to a key and hold that key to record.  A space is
+sent on press and another space is sent for every operating-system
+auto-repeat tick while the key is held; on release nothing extra is
+sent by default.  Claude Code's voice mode detects the resulting
+stream of spaces (just like a held spacebar in a regular terminal)
+and starts recording, then cleans up the echoed spaces itself.
+
+Voice mode must be enabled in Claude Code first by running the
+\\=`/voice\\=' slash command (set to \\='hold\\=' mode).  Until that is
+done, holding the key just types literal spaces.
+
+Customize `claude-code-voice-key-press-string',
+`claude-code-voice-key-repeat-string', and
+`claude-code-voice-key-release-string' to change the strings sent.
+`claude-code-voice-hold-timeout' controls how long after the last
+input event the key is considered released.  When
+`claude-code-voice-auto-send' is non-nil, the dictated text is
+submitted after release; see that variable for the available modes
+and `claude-code-voice-cancel-auto-send' to abort a pending send."
+  (interactive)
+  (if-let ((claude-code-buffer (claude-code--get-or-prompt-for-buffer)))
+      (let ((backend claude-code-terminal-backend)
+            (down-event last-input-event)
+            (continue t))
+        (with-current-buffer claude-code-buffer
+          (claude-code--term-send-string backend claude-code-voice-key-press-string)
+          (unwind-protect
+              (while continue
+                (let ((evt (read-event nil nil claude-code-voice-hold-timeout)))
+                  (cond
+                   ((null evt)
+                    (setq continue nil))
+                   ((equal evt down-event)
+                    (claude-code--term-send-string backend claude-code-voice-key-repeat-string))
+                   (t
+                    (push evt unread-command-events)
+                    (setq continue nil)))))
+            (claude-code--term-send-string backend claude-code-voice-key-release-string)
+            (claude-code--voice-schedule-auto-send claude-code-buffer))))
+    (claude-code--show-not-running-message)))
+
+(defun claude-code--voice-clear-input (buffer)
+  "Send a Ctrl-C to BUFFER to clear Claude Code's input box.
+
+No-op unless `claude-code-voice-clear-on-cancel' is non-nil."
+  (when (and claude-code-voice-clear-on-cancel
+             (buffer-live-p buffer))
+    (with-current-buffer buffer
+      (claude-code--term-send-string
+       claude-code-terminal-backend "\C-c"))))
+
+(defun claude-code--voice-schedule-auto-send (buffer)
+  "Arrange to auto-send dictated text in BUFFER per voice settings.
+
+Honors `claude-code-voice-auto-send', cancelling any previously
+pending send before scheduling a new one."
+  (claude-code-voice-cancel-auto-send 'quiet)
+  (pcase claude-code-voice-auto-send
+    ('nil nil)
+    ('confirm
+     (run-at-time
+      claude-code-voice-auto-send-delay nil
+      (lambda (buf)
+        (when (buffer-live-p buf)
+          (if (y-or-n-p "Send transcription to Claude? ")
+              (with-current-buffer buf
+                (claude-code--term-send-string
+                 claude-code-terminal-backend (kbd "RET")))
+            (claude-code--voice-clear-input buf))))
+      buffer))
+    (_
+     (setq claude-code--voice-pending-send-buffer buffer
+           claude-code--voice-pending-send-timer
+           (run-at-time
+            claude-code-voice-auto-send-delay nil
+            (lambda (buf)
+              (setq claude-code--voice-pending-send-timer nil
+                    claude-code--voice-pending-send-buffer nil)
+              (when (buffer-live-p buf)
+                (with-current-buffer buf
+                  (claude-code--term-send-string
+                   claude-code-terminal-backend (kbd "RET")))))
+            buffer))
+     (let ((map (make-sparse-keymap)))
+       (define-key map (kbd "<escape>") #'claude-code-voice-cancel-auto-send)
+       (define-key map (kbd "C-g")      #'claude-code-voice-cancel-auto-send)
+       (set-transient-map
+        map
+        (lambda () (timerp claude-code--voice-pending-send-timer))))
+     (message "Voice: auto-sending in %ss — ESC or C-g to cancel"
+              claude-code-voice-auto-send-delay))))
+
+;;;###autoload
+(defun claude-code-voice-cancel-auto-send (&optional quiet)
+  "Cancel a pending auto-send scheduled by `claude-code-voice-hold'.
+
+When `claude-code-voice-clear-on-cancel' is non-nil, also sends a
+Ctrl-C to the Claude Code buffer to clear the dictated text from the
+input box.  Does nothing if no auto-send is pending.  When QUIET is
+non-nil, suppress the status message."
+  (interactive)
+  (when (timerp claude-code--voice-pending-send-timer)
+    (cancel-timer claude-code--voice-pending-send-timer)
+    (let ((buf claude-code--voice-pending-send-buffer))
+      (setq claude-code--voice-pending-send-timer nil
+            claude-code--voice-pending-send-buffer nil)
+      (claude-code--voice-clear-input buf))
+    (unless quiet
+      (message "Voice auto-send cancelled."))))
 
 ;;;###autoload
 (defun claude-code-send-file (file-path)
