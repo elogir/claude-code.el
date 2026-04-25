@@ -936,7 +936,7 @@ _BACKEND is the terminal backend type (should be \\='vterm)."
 (defvar ghostel--process)
 (defvar ghostel--copy-mode-active)
 (defvar ghostel-kill-buffer-on-exit)
-(defvar ghostel-enable-title-tracking)
+(defvar ghostel-set-title-function)
 (declare-function ghostel-exec "ghostel")
 (declare-function ghostel-send-string "ghostel")
 (declare-function ghostel-send-key "ghostel")
@@ -1022,7 +1022,7 @@ _BACKEND is the terminal backend type (should be \\='ghostel)."
               (claude-code--kill-buffer buf))
             nil t)
   ;; Prevent ghostel from renaming the buffer via OSC title sequences
-  (setq-local ghostel-enable-title-tracking nil)
+  (setq-local ghostel-set-title-function nil)
   ;; Route bell to claude-code notification system
   ;; (ghostel native module calls `ding' on BEL, which uses ring-bell-function)
   (setq-local ring-bell-function #'claude-code--ghostel-bell-handler)
@@ -1344,6 +1344,26 @@ LINE-END is the ending line number for a range.  If nil, format single line."
           (format "@%s:%d-%d" file start end)
         (format "@%s:%d" file start)))))
 
+(defun claude-code-display-buffer-below (buffer)
+  "Displays the claude code BUFFER below the currently selected one."
+  (display-buffer buffer '((display-buffer-below-selected))))
+
+(defcustom claude-code-display-window-fn #'claude-code-display-buffer-below
+  "Function used to display the claude code window.
+
+Must be callable with a buffer as its parameter."
+  :type 'function)
+
+(defcustom claude-code-display-buffer-on-send t
+  "Whether to display the Claude buffer after sending a command.
+
+When non-nil (the default), sending a command via
+`claude-code-send-command' or related commands will display the Claude
+buffer in another window.  When nil, commands are sent silently in the
+background and the buffer is not shown unless a prefix argument is used
+to explicitly switch to it."
+  :type 'boolean)
+
 (defun claude-code--do-send-command (cmd)
   "Send a command CMD to Claude if Claude buffer exists.
 
@@ -1358,21 +1378,11 @@ Returns the selected Claude buffer or nil."
           (sit-for 0.1)
           ;; Send Return
           (claude-code--term-send-string claude-code-terminal-backend (kbd "RET"))
-          (display-buffer claude-code-buffer))
+          (when claude-code-display-buffer-on-send
+            (display-buffer claude-code-buffer)))
         claude-code-buffer)
     (claude-code--show-not-running-message)
     nil))
-
-
-(defun claude-code-display-buffer-below (buffer)
-  "Displays the claude code BUFFER below the currently selected one."
-  (display-buffer buffer '((display-buffer-below-selected))))
-
-(defcustom claude-code-display-window-fn #'claude-code-display-buffer-below
-  "Function used to display the claude code window.
-
-Must be callable with a buffer as its parameter."
-  :type 'function)
 
 (defun claude-code--start (arg extra-switches &optional force-prompt force-switch-to-buffer)
   "Start Claude with given command-line EXTRA-SWITCHES.
